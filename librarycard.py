@@ -1,3 +1,4 @@
+import random
 import discord
 import itertools
 import lib.goodreads as goodreads
@@ -926,6 +927,31 @@ def formatBookItemList(items):
         formattedItems.append("[{}]({})".format(item.name, item.link))    
     return ", ".join(formattedItems)
 
+async def easter_egg(message: discord.message):
+  chance = os.getenv('EASTER_EGG_CHANCE')
+  emoji_list = os.getenv('EASTER_EGG_EMOJI_LIST').split(',')
+  rng = random.random() * 100
+  if rng <= float(chance):
+    random_emoji = emoji_list[random.randint(0, emoji_list.__len__()-1)]
+    await message.add_reaction(random_emoji)
+
+async def royalroad_embed(message: discord.message):
+  if message.content.startswith(("https://www.royalroad.com/fiction/", "https://royalroad.com/fiction/")) :
+        book_url = message.content.split()[0]
+        embed = await getRoyalRoadBook("/".join(book_url.split('/')[:6])) #fixes the url format
+        if embed:
+            await message.channel.send(embed=embed, reference=message.to_reference())
+            await message.edit(suppress = True)
+
+async def goodreads_embed(message: discord.message):
+  if message.content.startswith(("https://www.goodreads.com/book/show/", "https://goodreads.com/book/show/")) :
+        book_url = message.content.split()[0]
+        embed = await getGoodreadsBook(book_url)
+        if embed:
+            await message.channel.send(embed=embed, reference=message.to_reference())
+            await message.edit(suppress = True)
+
+
 @bot.event
 async def on_ready():
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="dragons!"))
@@ -936,18 +962,8 @@ async def on_message(message: discord.message):
     if message.author == bot.user:
         return
 
-    if message.content.startswith(("https://www.goodreads.com/book/show/", "https://goodreads.com/book/show/")) :
-        book_url = message.content.split()[0]
-        embed = await getGoodreadsBook(book_url)        
-        if embed:
-            await message.channel.send(embed=embed, reference=message.to_reference())
-            await message.edit(suppress = True)
-    
-    if message.content.startswith(("https://www.royalroad.com/fiction/", "https://royalroad.com/fiction/")) :
-        book_url = message.content.split()[0]
-        embed = await getRoyalRoadBook("/".join(book_url.split('/')[:6])) #fixes the url format
-        if embed:
-            await message.channel.send(embed=embed, reference=message.to_reference())
-            await message.edit(suppress = True)
+    await goodreads_embed(message)
+    await royalroad_embed(message)
+    await easter_egg(message)
 
 bot.run(os.getenv('TOKEN'))

@@ -3,7 +3,7 @@ Description=librarycard
 [Service]
 User=librarycard
 Group=librarycard
-ExecStart=/bin/sh -c 'python3 /opt/librarycard/librarycard.py'
+ExecStart=/bin/sh -c 'python3.11 /opt/librarycard/librarycard.py'
 Type=simple
 Restart=on-failure
 RestartSec=10
