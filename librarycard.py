@@ -4,9 +4,10 @@ import itertools
 import lib.goodreads as goodreads
 import lib.royalroad as royalroad
 import os
+import sqlite3
+import time
 from dotenv import load_dotenv
 import typing
-import pymongo
 from bson.objectid import ObjectId
 import math
 from discord.ext.pages import Paginator
@@ -19,17 +20,81 @@ from discord import guild_only
 
 load_dotenv()
 
-client = pymongo.MongoClient(os.getenv('MONGO_STRING'))
-books = client.librarycard.books
+pagination = int(os.environ['PAGINATION'])
 
-books.create_index([('name', TEXT)])
-books.create_index([('guild', ASCENDING)])
-books.create_index([('readers.user', ASCENDING)])
+db = sqlite3.connect(os.environ['SQLITE3_DATABASE'])
+db.executescript('''
+    PRAGMA foreign_keys = ON;
 
-nominateSessions = client.librarycard.nominateSessions
+    CREATE TABLE IF NOT EXISTS books (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild INTEGER,
+        added REAL,
+        addedBy INTEGER,
+        name TEXT,
+        UNIQUE (guild, name)
+    );
+    CREATE INDEX IF NOT EXISTS books_idx_guild ON books (guild);
+    CREATE INDEX IF NOT EXISTS books_idx_name ON books (name);
+    CREATE TABLE IF NOT EXISTS books_readers (
+        book INTEGER REFERENCES books(id) ON UPDATE CASCADE ON DELETE CASCADE,
+        reader INTEGER,
+        added REAL,
+        UNIQUE (book, reader)
+    );
 
-nominateSessions.create_index([('guild', ASCENDING)])
-nominateSessions.create_index([('nominations.name', ASCENDING)])
+    CREATE TABLE IF NOT EXISTS sessions (
+        id INTEGER PRIMARY KEY,
+        guild INTEGER,
+        ended INTEGER DEFAULT 0,
+        endedBy INTEGER,
+        endedAt REAL,
+    );
+
+    CREATE TABLE IF NOT EXISTS nominations(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session INTEGER REFERENCES sessions(id) ON UPDATE CASCADE ON DELETE CASCADE,
+        name TEXT,
+        nominee INTEGER,
+        added REAL,
+        UNIQUE (session, name, nominee)
+    );
+    CREATE INDEX IF NOT EXISTS nominations_idx_guild ON nominations(guild);
+    CREATE INDEX IF NOT EXISTS nominations_idx_name ON nominations(name);
+    CREATE INDEX IF NOT EXISTS nominations_idx_nominee ON nominations(nominee);
+''')
+db.commit()
+
+def current_session(guild_id):
+    result = db.execute(
+            'SELECT id FROM sessions WHERE guild=? AND NOT ended LIMIT 1', (guild_id,)
+    ).fetchone()
+    if result is None:
+        return None
+    return result[0]
+
+def book_id_by_name(book):
+    result = db.execute('SELECT id FROM books WHERE name=? LIMIT 1', (book,)).fetchone()
+    if result is None:
+        return None
+    return result[0]
+
+def into_paginated_embed(rows, make_embed, add_datum, enumerates=False):
+    pages = []
+    offset = 0
+    while rows:
+        current = rows[:pagination]
+        rows = rows[pagination:]
+        embed = make_embed(current)
+        if enumerates:
+            for idx, row in enumerate(current):
+                add_datum(embed, idx + offset, *row)
+        else:
+            for row in current:
+                add_datum(embed, *row)
+        pages.append(embed)
+        offset += pagination
+    return Paginator(pages=pages)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -39,677 +104,256 @@ bot = discord.Bot(intents=intents)
 @guild_only()
 @default_permissions(manage_messages=True)
 async def addBook(ctx, book: str):
+    if db.execute('SELECT 1 FROM books WHERE name=? LIMIT 1').fetchall():
 
-  search = {
-    'name': book,
-    'guild': ctx.guild_id,
-  }
-  found = books.find(search).limit(10)
-
-  count = 0
-  for d in found:
-    count += 1
-  if count > 0:
-    await ctx.respond('Identical book exists already')
-    return
-
-    
-  document = {
-    'name': book.strip(),
-    'guild': ctx.guild_id,
-    'added': datetime.now(),
-    'readers': []
-  }
-  result = books.insert_one(document)
-  if (result.inserted_id): 
-    await ctx.respond(f'***{book}*** added to library')
-  else:
-    await ctx.respond('Failed to add book to library')
+    try:
+        with db:
+            db.execute('INSERT INTO books (guild, added, addedBy, name) VALUES (?, ?, ?, ?)',
+                       (ctx.guild_id, time.time(), ctx.author.id, book),
+            )
+    except sqlite3.IntegrityError as e:
+        if e.args[0] == 'UNIQUE constraint failed: books.guild, books.name':
+            await ctx.respond('Identical book exists already in your Flight')
+        else:
+            raise
+    else:
+        await ctx.respond(f'***{book}*** added to library')
 
 @bot.slash_command(name="delbook", description = "Remove a book from your Flight's library")
 @guild_only()
 @default_permissions(manage_messages=True)
 async def delBook(ctx, book: str):
-
-  search = {
-    'name': book,
-    'guild': ctx.guild_id,
-  }
-  projection ={
-    'readers': 0
-  }
-  found = books.find(search, projection).limit(25)
-
-  foundBooks = []
-
-  count = 0
-  for d in found:
-    foundBooks.append(d)
-    count += 1
-
-  if count < 1:
-    await ctx.respond('Book not found')
-    return
-
-  if count > 1:
-    
-    embed = discord.Embed(title="Error: Book Conflict", description="Please use `delbookbyid` instead.")
-    embed.add_field(name="[Book Id]", value="[Book Name]", inline=False)
-    for b in foundBooks:
-      embed.add_field(name=b['_id'], value=b['name'], inline=False)
-    await ctx.respond(embed=embed)
-    return
-
-  result = books.delete_one(search)
-  if result.acknowledged:
-    await ctx.respond('Book deleted')
-  else:
-    await ctx.respond('Book not deleted')
+    with db:
+        cur = db.execute('DELETE FROM books WHERE name=? AND guild=?', (book, ctx.guild_id))
+        if cur.rowcount:
+            await ctx.respond('Book deleted')
+        else:
+            await ctx.respond('Book not found')
 
 @bot.slash_command(name="delbookbyid", description = "Remove a book from your Flight's library")
 @guild_only()
 @default_permissions(manage_messages=True)
 async def delBookById(ctx, id: str):
+    try:
+        id = int(id)
+    except ValueError:
+        await ctx.respond(f'"{id}" is not a valid integer.')
+        return
 
-  search = {
-    "_id": ObjectId(id),
-    'guild': ctx.guild_id,
-  }
-  result = books.delete_one(search)
-  if result.acknowledged:
-    await ctx.respond('Book deleted')
-  else:
-    await ctx.respond('Book not deleted')
+    with db:
+        cur = db.execute('DELETE FROM books WHERE id=? AND guild=?', (id, ctx.guild_id))
+        if cur.rowcount:
+            await ctx.respond('Book deleted')
+        else:
+            await ctx.respond('No such book')
 
 @bot.slash_command(name="library", description = "List all the book in your Flight's library")
 @guild_only()
 async def library(ctx):
+    results = db.execute(
+            'SELECT name, count(reader) FROM books JOIN books_readers ON books.id = books_readers.book WHERE guild=? GROUP BY books.id',
+            (ctx.guild_id,),
+    ).fetchall()
+    if not results:
+        await ctx.respond('Library Empty')
+        return
+    total = len(results)
 
-  count = books.count_documents({'guild': ctx.guild_id})
-  pagecount = math.ceil((count/10))
-
-  pages = []
-
-  for p in range(pagecount):
-    search = {
-      'guild': ctx.guild_id
-    }
-    found = books.find(search).sort([('added', DESCENDING)]).limit(10).skip((p) * 10)
-
-    embed = discord.Embed(title="Book listing", description= str(count) + " books in the library.")
-    for b in found:
-      embed.add_field(name=b['name'], value='Readers: ' + str(len(b['readers'])), inline=False)
-    
-    pages.append(embed)
-  
-  if len(pages) == 0:
-    await ctx.respond('Library Empty')
-    return
-
-  pagination = Paginator(pages=pages)
-  await pagination.respond(ctx.interaction, ephemeral=True)
+    pagination = into_paginated_embed(results,
+        lambda _: discord.Embed(
+            title='Book listing',
+            description=f'{total} books in the library.',
+        ),
+        lambda embed, name, readers: \
+                embed.add_field(name=name, value=f'Readers: {readers}', inline=False),
+    )
+    await pagination.respond(ctx.interaction, ephemeral=True)
 
 @bot.slash_command(name="unopened", description = "List all the books you haven't read yet")
 @guild_only()
 async def unopened(ctx):
-  
+    results = db.execute(
+            'SELECT name FROM books EXCEPT SELECT name FROM books JOIN book_readers ON book.id = book_readers.book WHERE reader=?',
+            (ctx.author.id,)
+    ).fetchall()
+    if not results:
+        await ctx.respond('You\'ve read it all')
+        return
+    total = len(results)
 
-  countpipeline = [ 
-
-    { '$match': {
-    'guild': ctx.guild_id,
-    }}, {
-      '$project': {
-
-      'name': {'$toLower':"$name"},
-      'hasread': {
-        '$in': [
-          ctx.author.id, "$readers.user"
-        ]
-      },
-      
-      }
-    },
-    {
-      '$match': {
-        'hasread': False
-      }
-    }, {
-        '$group': {
-            '_id': 'counter', 
-            'count': {
-                '$count': {}
-            }
-        }
-    }
-
-  ]
-  
-
-  countagg = books.aggregate(countpipeline)
-
-  crp = {}
-  for l in countagg:
-    crp = l
-
-  pagecount = math.ceil((int(crp['count'])/10))
-
-  pages = []
-
-  for p in range(pagecount):
-    searchPipeline = [ 
-
-    { '$match': {
-    'guild': ctx.guild_id,
-    }}, 
-    {
-        '$sort': {
-          'added': -1
-        }
-      },
-      {
-      '$project': {
-
-      'name': "$name",
-      'hasread': {
-        '$in': [
-          ctx.author.id, "$readers.user"
-        ]
-      },
-      
-      }
-    },
-    {
-      '$match': {
-        'hasread': False
-      }
-    },
-      {
-        '$skip': p * 10
-      },
-      {
-        '$limit' : 10
-      }
-
-  ]
-    found = books.aggregate(searchPipeline)
-
-    embed = discord.Embed(title="Book listing", description= str(crp['count']) + " books left.")
-    for b in found:
-      embed.add_field(name=b['name'], value='', inline=False)
-    
-    pages.append(embed)
-  
-  if len(pages) == 0:
-    await ctx.respond('You\'ve read it all')
-    return
-
-  pagination = Paginator(pages=pages)
-  await pagination.respond(ctx.interaction, ephemeral=True)
+    pagination = into_paginated_embed(results,
+        lambda _: discord.Embed(
+            title='Book listing',
+            description=f'You have {total} books left.',
+        ),
+        lambda embed, name: embed.add_field(name=name, value='', inline=False),
+    )
+    await pagination.respond(ctx.interaction, ephemeral=True)
 
 
 @bot.slash_command(name="readbook", description="Read a book and add it to your hoard")
 @guild_only()
 async def readBook(ctx, book: str):
-  searchpipeline = [ 
-    { '$match': {
-    'guild': ctx.guild_id,
-    }}, {
-      '$project': {
+    book_id = book_id_by_name(book)
+    if book_id is None:
+        await ctx.respond('Book not found', ephemeral=True)
+        return
 
-      'name': {'$toLower':"$name"},
-      
-      }
-    },
-    {
-      '$match': {
-        'name': book.lower()
-      }
-    }
-
-  ]
-
-  found = books.aggregate(searchpipeline)
-
-  foundBooks = []
-  foundbook = {}
-
-  count = 0
-  for d in found:
-    foundBooks.append(d)
-    foundbook = d
-    count += 1
-
-  if count < 1:
-    await ctx.respond('Book not found', ephemeral=True)
-    return
-
-  if count > 1:
-    
-    embed = discord.Embed(title="Error: Book Conflict", description="Please use `readbookbyid` instead.")
-    embed.add_field(name="[Book Id]", value="[Book Name]", inline=False)
-    for b in foundBooks:
-      embed.add_field(name=b['_id'], value=b['name'], inline=False)
-    await ctx.respond(embed=embed)
-    return
-
-
-  existingsearchpipeline = [ 
-    { '$match': {
-    'guild': ctx.guild_id,
-    'readers.user': ctx.author.id,
-    }}, {
-      '$project': {
-
-      'name': {'$toLower':"$name"},
-      
-      }
-    },
-    {
-      '$match': {
-        'name': book.lower()
-      }
-    }
-
-  ]
-
-  foundexisting = books.aggregate(existingsearchpipeline)
-
-  
-
-  existingcount = 0
-  for d in foundexisting:
-    existingcount += 1
-  
-  if existingcount > 0:
-    await ctx.respond('Already hoarded this book', ephemeral=True)
-    return
-
-  search = {
-    '_id': foundbook['_id'],
-    'guild': ctx.guild_id,
-  }
-
-  readerobject = {
-    'read': datetime.now(),
-    'user': ctx.author.id,
-    'guild': ctx.guild_id,
-  }
-  result = books.update_one(search, {
-    '$push': {
-      'readers': readerobject
-    }
-  })
-
-  if result.acknowledged:
-    await ctx.respond(f'{book} added to hoard')
-  else: 
-    await ctx.respond('Book could not be added to hoard')
-
+    try:
+        with db:
+            db.execute('INSERT INTO books_readers (book, reader, added) VALUES (?, ?, ?)',
+                       (book_id, ctx.author.id, time.time())
+            )
+    except sqlite3.IntegrityError as e:
+        if e.args[0] == 'UNIQUE constraint failed: book_readers.book, book_readers.reader':
+            await ctx.respond('Already hoarded this book', ephemeral=True)
+            return
+        else:
+            raise
+    else:
+        await ctx.respond(f'{book} added to hoard')
 
 @bot.slash_command(name="forgetbook", description="Forget about a book and remove it from your hoard")
 @guild_only()
 async def forgetBook(ctx, book:str):
-  existingsearchpipeline = [ 
-    { '$match': {
-    'guild': ctx.guild_id,
-    'readers.user': ctx.author.id,
-    }}, {
-      '$project': {
+    result = db.execute('SELECT book FROM book_readers WHERE reader=?', (ctx.author.id,)).fetchone()
+    if result is None:
+        await ctx.respond('You have nothing to forget')
+        return
 
-      'name': {'$toLower':"$name"},
-      
-      }
-    },
-    {
-      '$match': {
-        'name': book.lower()
-      }
-    }
+    book_id = book_id_by_name(book)
+    if book_id is None:
+        await ctx.respond('Book not found', ephemeral=True)
+        return
 
-  ]
-
-  foundexisting = books.aggregate(existingsearchpipeline)
-
-  existing = []
-  existingbook = {}
-
-  existingcount = 0
-  for d in foundexisting:
-    existing.append(d)
-    existingbook = d
-    existingcount += 1
-  
-  if existingcount == 0:
-    await ctx.respond('You have nothing to forget')
-    return
-  if existingcount > 1:
-    embed = discord.Embed(title="Error: Book Conflict", description="Please use `forgetbookbyid` instead.")
-    embed.add_field(name="[Book Id]", value="[Book Name]", inline=False)
-    for b in existing:
-      embed.add_field(name=b['_id'], value=b['name'], inline=False)
-    await ctx.respond(embed=embed)
-    return
-
-  search = { '_id': existingbook['_id'],'guild': ctx.guild_id,}
-  update = {
-          '$pull': {
-            'readers': {
-              'user': ctx.author.id
-            }
-          }
-        }
-        
-  
-  result = books.update_one(search, update)
-
-
-  if result.acknowledged:
-    await ctx.respond('You forgot about ' + book)
-  else: 
-    await ctx.respond('You\'re bad at forgetting')
-
+    with db:
+        cur = db.execute('REMOVE FROM book_readers WHERE reader=? AND book=?', (ctx.author.id, book_id))
+        if cur.rowcount:
+            await ctx.respond('You forgot about ' + book)
+        else:
+            await ctx.respond('You\'re bad at forgetting')
 
 @bot.slash_command(name="hoard", description="Check out your (or a wingmate's) hoard")
 @guild_only()
 async def hoard(ctx, user: typing.Optional[discord.Member]):
+    userid = ctx.author.id
+    username = ctx.author.name
+    possess = 'Your'
+    ephem = True
 
-  userid = ctx.author.id
-  username = ctx.author.name
-  ephem = True
+    if user:
+        userid = user.id
+        username = user.name
+        possess = 'Their'
+        ephem = False
 
-  if user:
-    userid = user.id
-    username = user.name
-    ephem = False
+    results = db.execute(
+            'SELECT name, \
+                    strftime("%Y-%m-%d %H:%M:%SZ", books_readers.added, "unixepoch") AS time\
+             FROM books JOIN books_readers ON books.id = books_readers.book \
+             WHERE reader = ?',
+             (userid,)
+    ).fetchall()
+    if not results:
+        await ctx.respond(f'{possess} hoard is lacking', ephemeral=ephem)
+        return
 
-
-  search = {
-      'guild': ctx.guild_id,
-      'readers.user': userid,
-      }
-
-  count = books.count_documents(search)
-  pagecount = math.ceil((count/10))
-
-  pages = []
-
-  for p in range(pagecount):
-
-    pipeline = [
-      {
-      '$match': {
-            
-            'guild': ctx.guild_id,
-            'readers.user': userid,
-            
-          }
-      },
-      {
-        '$unwind': {
-          'path': '$readers'
-        }
-      },
-      {
-        '$match': {
-          'readers.user': userid
-        }
-      }, 
-      {
-        '$sort': {
-          'readers.read': -1
-        }
-      },
-      {
-        '$skip': p * 10
-      },
-      {
-        '$limit' : 10
-      }
-
-    ]
-    found = books.aggregate(pipeline)
-
-    embed = discord.Embed(title="Book listing", description= str(count) + " books in " + username + "'s hoard." )
-    for b in found:
-      embed.add_field(name=b['name'], value='Hoarded ' + str(b['readers']['read'].date()) , inline=False)
-    
-    pages.append(embed)
-  
-  if len(pages) == 0:
-    await ctx.respond('Your hoard is lacking', ephemeral=ephem)
-    return
-
-  pagination = Paginator(pages=pages)
-  await pagination.respond(ctx.interaction, ephemeral=ephem)
+    pagination = into_paginated_embed(results,
+        lambda _: discord.Embed(
+            title='Book listing',
+            description=f"{total} books in {username}'s hoard",
+        ),
+        lambda embed, name, time: \
+            embed.add_field(name=name, value=f'Hoarded {time}', inline=False),
+    )
+    await pagination.respond(ctx.interaction, ephemeral=ephem)
 
 @bot.slash_command(name="leaderboard", description="See who's hoard is the biggest")
 @guild_only()
 async def leaderboard(ctx):
-  countpipeline = [
-      {'$match': {'guild': ctx.guild_id}},
-      {'$unwind': {'path': '$readers'}}, 
-      {'$replaceRoot': {'newRoot': '$readers'}}, 
-      {
-          '$group': {
-              '_id': '$user', 
-              'count': {
-                  '$count': {}
-              }
-          }
-      },
-      {'$count': 'count'}
-    ] 
-  
+    results = db.execute(
+            'SELECT reader, count(book) AS size \
+             FROM books_readers JOIN books ON books.id = books_readers.book \
+             WHERE guild=? \
+             GROUP BY reader \
+             ORDER BY size DESC',
+            (ctx.guild_id,),
+    ).fetchall()
+    if not results:
+        await ctx.respond('Library Empty')
+        return
+    total = len(results)
 
-  countagg = books.aggregate(countpipeline)
-
-  crp = {}
-  for l in countagg:
-    crp = l
-
-  pagecount = math.ceil((int(crp['count'])/10))
-
-  pages = []
-  place = 1
-  count = int(crp['count'])
-
-  for p in range(pagecount):
-    pipeline = [
-      {'$match': {'guild': ctx.guild_id}},
-      {'$unwind': {'path': '$readers'}}, 
-      {'$replaceRoot': {'newRoot': '$readers'}}, 
-      {
-          '$group': {
-              '_id': '$user', 
-              'count': {
-                  '$count': {}
-              }
-          }
-      },
-      { '$sort': {'count': -1,},
-      }, 
-      { '$skip': p * 10 },
-      { '$limit' : 10 }
-    ] 
-
-    found = books.aggregate(pipeline)
-
-    embed = discord.Embed(title="Book listing", description= str(count) + " on the board.")
-    for b in found:
-      embed.add_field(name="", value=f"{place}: <@{str(b['_id'])}>\n**Books hoarded: {str(b['count'])}**", inline=False)
-      place += 1
-    
-    pages.append(embed)
-    
-  
-  if len(pages) == 0:
-    await ctx.respond('Library Empty')
-    return
-
-  pagination = Paginator(pages=pages)
-  await pagination.respond(ctx.interaction)
+    pagination = into_paginated_embed(results,
+        lambda _: discord.Embed(
+            title='Book listing',
+            description=f'{total} on the board.',
+        ),
+        lambda embed, idx, userid, size: \
+                embed.add_field(name='', value=f'{idx+1}: <@{userid}>\n**Books hoarded: {size}**', inline=False),
+        enumerates=True,
+    )
+    await pagination.respond(ctx.interaction)
 
 @bot.slash_command(name="start-session", description = "Starts a new reading session for your Flight")
 @guild_only()
 @default_permissions(manage_messages=True)
 async def startSession(ctx):
-  search = {
-    'guild': ctx.guild_id,
-    'ended': {'$exists': False}
-  }
+    if current_session(ctx.guild_id) is not None:
+        await ctx.respond('Your flight already have an active reading session.')
+        return
 
-  # Caps so the server can only have one active session at a time.
-  found = nominateSessions.count_documents(search, limit=1)
-  if(found != 0):
-    await ctx.respond('Your flight already have an active reading session.')
-    return
-  
-  document = {
-  'guild': ctx.guild_id,
-  'added': datetime.now(),
-  'user': ctx.author.id,
-  'nominations': []
-  }
-  result = nominateSessions.insert_one(document)
-  if (result.inserted_id): 
+    with db:
+        db.execute(
+                'INSERT INTO sessions (guild) VALUES (?)',
+                (ctx.guild_id,),
+        )
     await ctx.respond(f'<@{ctx.author.id}> started a new reading session.')
-  else:
-    await ctx.respond('Failed to start reading session')
 
 @bot.slash_command(name="end-session", description = "Ends the current reading session for your Flight")
 @guild_only()
 @default_permissions(manage_messages=True)
 async def endSession(ctx):
-  search = {
-    'guild': ctx.guild_id,
-    'ended': {'$exists': False}
-  }
+    if current_session(ctx.guild_id) is None:
+        await ctx.respond('Your flight doesn\'t have an active reading session.')
+        return
 
-  # Caps so the server can only have one active session at a time.
-  found = nominateSessions.count_documents(search, limit=1)
-  if(found == 0):
-    await ctx.respond('Your flight doesn\'t have an active reading session.')
-    return
-    
-  result = nominateSessions.update_one(search, {
-    '$set': {
-      'ended': datetime.now(),
-      'endedUser': ctx.author.id
-    }
-  })
+    with db:
+        db.execute(
+                'UPDATE sessions SET ended=?, endedBy=?, endedAt=? WHERE guild=? AND NOT ended',
+                (1, ctx.author.id, time.time(), ctx.guild_id),
+        )
 
-  if result.acknowledged:
     await ctx.respond('The current session has ended')
-  else: 
-    await ctx.respond('Failed to end the current session')
 
 @bot.slash_command(name="nominate", description = "Nominate a book to your Flight's reading session")
 @guild_only()
 async def addNomination(ctx, book: str):
-  book = pascal_case(str.strip(book))
-  search = {
-    'guild': ctx.guild_id,
-    'ended': {'$exists': False}
-  }
+    session = current_session(ctx.guild_id)
+    if session is None:
+        await ctx.respond('Your flight doesn\'t have an active reading session.')
+        return
 
-  # Caps so the server can only have one active session at a time.
-  found = nominateSessions.count_documents(search, limit=1)
-  if(found == 0):
-    await ctx.respond('Your flight doesn\'t have an active reading session.')
-    return
-  
-  existingNominationSearchPipeline = [
-    {
-        '$match': {
-            'guild': ctx.guild_id, 
-            'ended': {
-                '$exists': False
-            }
-        }
-    }, {
-        '$unwind': '$nominations'
-    }, {
-        '$replaceRoot': {
-            'newRoot': '$nominations'
-        }
-    }, {
-        '$project': {
-            'name': {
-                '$toLower': '$name'
-            }, 
-            'user': True
-        }
-    }, {
-        '$match': {
-            'user': ctx.author.id
-        }
-    }, {
-        '$match': {
-            'name': book.lower()
-        }
-    }
-  ]
+    book = pascal_case(str.strip(book))
+    if book_id_by_name(book) is not None:
+        await ctx.respond(f'{book} cannot be nominated for it was already chosen by the Flight.', ephemeral=True)
+        return
 
-  foundExistingNomination = nominateSessions.aggregate(existingNominationSearchPipeline)
-  existingNominationCount = 0
-  for d in foundExistingNomination:
-    existingNominationCount += 1
+    try:
+        with db:
+            db.execute(
+                    'INSERT INTO nominations (session, name, nominee, added) VALUES (?, ?, ?, ?)',
+                    (session, book, ctx.author.id, time.time()),
+            )
+    except sqlite3.IntegrityError as e:
+        if e.args[0] == 'UNIQUE constraint failed: nominations.guild, nominations.name, nominations.nominee':
+            await ctx.respond(f'You already nominated {book} for this session.', ephemeral=True)
+            return
+        else:
+            raise
+    else:
+        await ctx.respond(f'{book} nominated!')
   
-  if existingNominationCount > 0:
-    await ctx.respond(f'You already nominated {book}', ephemeral=True)
-    return
-  
-  existingBookSearchPipeline = [
-    {
-        '$match': {
-            'guild': ctx.guild_id
-        }
-    }, {
-        '$project': {
-            '_id': False, 
-            'name': {
-                '$toLower': '$name'
-            }
-        }
-    }, {
-        '$match': {
-            'name': book.lower()
-        }
-    }
-]
-
-  foundExistingBooks = books.aggregate(existingBookSearchPipeline)
-  existingBookCount = 0
-  for d in foundExistingBooks:
-    existingBookCount += 1
-  
-  if existingBookCount > 0:
-    await ctx.respond(f'{book} cannot be nominated for it was already chosen by the club.', ephemeral=True)
-    return
-  
-  foundSession = nominateSessions.find_one(search)
-  search = {
-    '_id': foundSession['_id'],
-    'guild': ctx.guild_id,
-  }
-  
-  readerobject = {
-    'nominated': datetime.now(),
-    'name': book,
-    'user': ctx.author.id
-  }
-  result = nominateSessions.update_one(search, {
-    '$push': {
-      'nominations': readerobject
-    }
-  })
-
-  if result.acknowledged:
-    await ctx.respond(f'{book} nominated!')
-  else: 
-    await ctx.respond('Book could not be nominated')
-
 @bot.slash_command(name="draw-nominees", description = "List all the book in your Flight's library")
 @guild_only()
 @default_permissions(manage_messages=True)
@@ -717,145 +361,99 @@ async def drawNominees(
   ctx, 
   min_nominations: Option(int, "Minimum of times the book received a nomination in the session search period.", min_value=2, default=2),
   past_sessions: Option(int, "How many prior sessions should be considered in the search.", min_value=0, default=0)):
+    sessions = []
+    # Add the current session, if it exists
+    session = current_session(ctx.guild_id)
+    if session is None:
+        sessions.append(session)
+    # ... and then any prior, at option
+    if past_sessions:
+        sessions.extend(db.execute(
+            'SELECT id FROM sessions WHERE guild=? AND ended ORDER BY endedAt DESC LIMIT ?',
+            (ctx.guild_id, past_sessions),
+        ))
 
-  search = [
-    {
-        '$match': {
-            'guild': ctx.guild_id
-        }
-    }, {
-        '$sort': {
-            'added': -1
-        }
-    }, {
-        '$limit': past_sessions + 1
-    }, {
-        '$unwind': {
-            'path': '$nominations'
-        }
-    }, {
-        '$replaceRoot': {
-            'newRoot': '$nominations'
-        }
-    }, {
-        '$sortByCount': {
-            '$toLower': '$name'
-        }
-    }, {
-        '$match': {
-            'count': {
-                '$gt': min_nominations - 1
-            }
-        }
-    }
-  ]
+    if not sessions:
+        await ctx.respond('There are no sessions to choose from.')
+        return
 
-  found = nominateSessions.aggregate(search)
+    # We'll want to set this up for efficient union at the database level
+    with db:
+        db.execute('CREATE TEMPORARY TABLE IF NOT EXISTS selected_sessions (session INTEGER)')
+        db.executemany('INSERT INTO temp.selected_sessions (session) VALUES (?)',
+                       [(item,) for item in sessions],
+        )
 
-  embed = discord.Embed(title="Book Nominees", description="Here are the chosen books with at least {} nominations".format(min_nominations))
-  itemList = ""
-  bookCount = 1
-  for b in found:
-    itemList += "\n{}. {} ({})".format(bookCount, pascal_case(b['_id']), b['count'])
-    bookCount += 1
+    # Now actually draw the nominees
+    results = db.execute(
+            'SELECT name, \
+                count(nominee) AS elections \
+             FROM nominations \
+             WHERE session IN (SELECT session FROM temp.selected_sessions) AND \
+                elections >= ? \
+             GROUP BY name \
+             ORDER BY elections DESC',
+             (min_nominations,),
+    ).fetchall()
+    if not results:
+        await ctx.respond('No books matched your selection criteria.')
+        return
 
-  embed.add_field(name="Nominees", value=itemList, inline=False)
-
-  await ctx.respond(embed=embed, ephemeral=True)
+    paginator = into_paginated_embed(results,
+        lambda _: discord.Embed(
+            title='Book nominees',
+            description=f'Here are the hchosen books with at least {min_nominations} nominations.',
+        ),
+        lambda embed, idx, name, nominations: \
+                 embed.add_field(name=str(idx+1), value=f'{name} ({nominations})', inline=False),
+        enumerates=True,
+    )
+    await pagination.respond(ctx.interaction, ephemeral=True)
 
 @bot.slash_command(name="list-nominations", description="Lists all nomination for the current active session")
 @guild_only()
 async def listNominations(ctx, past_sessions: Option(int, "How many prior sessions should be considered in the search.", min_value=0, max_value=5, default=0)):
+    sessions = []
+    session = current_session(ctx.guild_id)
+    if session is not None:
+        sessions.append(session)
+    if past_sessions:
+        sessions.extend(db.execute(
+                'SELECT id FROM sessions WHERE guild=? AND ended ORDER BY endedAt DESC LIMIT ?',
+                (ctx.guild_id, past_sessions),
+        ))
 
-  search_count = [
-    {
-        '$match': {
-            'guild': ctx.guild_id
-        }
-    }, {
-        '$sort': {
-            'added': -1
-        }
-    }, {
-        '$limit': past_sessions + 1
-    }, {
-        '$unwind': {
-            'path': '$nominations'
-        }
-    }, {
-        '$replaceRoot': {
-            'newRoot': '$nominations'
-        }
-    }, {
-        '$sortByCount': {
-            '$toLower': '$name'
-        }
-    }, {
-        '$count': 'Total'
-    }
-  ]
+    if not sessions:
+        await ctx.respond('There are no sessions matching those critera.')
+        return
 
-  search = [
-    {
-        '$match': {
-            'guild': ctx.guild_id
-        }
-    }, {
-        '$sort': {
-            'added': -1
-        }
-    }, {
-        '$limit': past_sessions + 1
-    }, {
-        '$unwind': {
-            'path': '$nominations'
-        }
-    }, {
-        '$replaceRoot': {
-            'newRoot': '$nominations'
-        }
-    }, {
-        '$sortByCount': {
-            '$toLower': '$name'
-        }
-    }, {
-      '$sort': {
-            '_id': 1
-        }
-    }
-  ]
+    with db:
+        db.execute('CREATE TEMPORARY TABLE IF NOT EXISTS selected_sessions (session INTEGER)')
+        db.executemany('INSERT INTO temp.selected_sessions (session) VALUES (?)',
+                       [(item,) for item in sessions],
+        )
 
-  found_count = nominateSessions.aggregate(search_count)
-  count = 0
-  for b in found_count:
-    count = b['Total']
+    results = db.execute(
+            'SELECT name, count(nominee) AS elections \
+             FROM nominations \
+             WHERE session IN (SELECT session FROM temp.selected_sessions) \
+             GROUP BY name
+             ORDER BY elections DESC',
+    ).fetchall()
+    if not results:
+        await ctx.respond('There are no nominations within the selected sessions.')
+        return
 
-  found = nominateSessions.aggregate(search)
-
-  page_size = 10
-  pagecount = math.ceil((count/page_size))
-  bookCount = 1
-
-  pages = []
-
-  for p in range(pagecount):
-    embed = discord.Embed(title="Book Nomination", description= str(count) + " books currently nominated" )
-    itemList = ""
-
-    for b in itertools.islice(found, page_size):
-      itemList += "\n{}. {}".format(bookCount, pascal_case(str(b['_id'])))
-      bookCount += 1
-      
-    embed.add_field(name='Current Nominated Books', value=itemList, inline=False)
-
-    pages.append(embed)
-  
-  if len(pages) == 0:
-    await ctx.respond('No books nominated yet', ephemeral=True)
-    return
-
-  pagination = Paginator(pages=pages)
-  await pagination.respond(ctx.interaction, ephemeral=True)
+    paginator = into_paginated_embed(results,
+        lambda _: discord.Embed(
+            title='Book nomination',
+            description=f'{len(results)} books currently nominated.',
+        ),
+        lambda embed, idx, name, nominations: \
+                embed.add_field(name=str(idx+1), value=f'{name} ({nominations})', inline=False),
+        enumerates=True,
+    )
+    await paginator.respond(ctx.interaction, ephemeral=True)
 
 async def getGoodreadsBook(book_url):
     book = await goodreads.getBook(book_url)
