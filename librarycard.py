@@ -5,6 +5,7 @@ import itertools
 import lib.goodreads as goodreads
 import lib.royalroad as royalroad
 import os
+import asyncio
 import aiosqlite
 import time
 from dotenv import load_dotenv
@@ -21,7 +22,7 @@ from discord import guild_only
 
 load_dotenv()
 
-pagination = int(os.environ['PAGINATION'])
+pagination = int(os.environ.get('PAGINATION', 10))
 
 db = contextvars.ContextVar('db')
 
@@ -67,10 +68,10 @@ bot = discord.Bot(intents=intents)
 @default_permissions(manage_messages=True)
 async def addBook(ctx, book: str):
     try:
-        async with db.get() as xact:
-            await xact.execute('INSERT INTO books (guild, added, addedBy, name) VALUES (?, ?, ?, ?)',
-                       (ctx.guild_id, time.time(), ctx.author.id, book),
-            )
+        await db.get().execute('INSERT INTO books (guild, added, addedBy, name) VALUES (?, ?, ?, ?)',
+                   (ctx.guild_id, time.time(), ctx.author.id, book),
+        )
+        await db.get().commit()
     except aiosqlite.IntegrityError as e:
         if e.args[0] == 'UNIQUE constraint failed: books.guild, books.name':
             await ctx.respond('Identical book exists already in your Flight')
@@ -83,12 +84,12 @@ async def addBook(ctx, book: str):
 @guild_only()
 @default_permissions(manage_messages=True)
 async def delBook(ctx, book: str):
-    async with db.get() as xact:
-        cur = await xact.execute('DELETE FROM books WHERE name=? AND guild=?', (book, ctx.guild_id))
+    async with db.get().execute('DELETE FROM books WHERE name=? AND guild=?', (book, ctx.guild_id)) as cur:
         if cur.rowcount:
             await ctx.respond('Book deleted')
         else:
             await ctx.respond('Book not found')
+    await db.get().commit()
 
 @bot.slash_command(name="delbookbyid", description = "Remove a book from your Flight's library")
 @guild_only()
@@ -100,12 +101,12 @@ async def delBookById(ctx, id: str):
         await ctx.respond(f'"{id}" is not a valid integer.')
         return
 
-    async with db.get() as xact:
-        async with xact.execute('DELETE FROM books WHERE id=? AND guild=?', (id, ctx.guild_id)) as cur:
-            if cur.rowcount:
-                await ctx.respond('Book deleted')
-            else:
-                await ctx.respond('No such book')
+    async with db.get().execute('DELETE FROM books WHERE id=? AND guild=?', (id, ctx.guild_id)) as cur:
+        if cur.rowcount:
+            await ctx.respond('Book deleted')
+        else:
+            await ctx.respond('No such book')
+    await db.get().commit()
 
 @bot.slash_command(name="library", description = "List all the book in your Flight's library")
 @guild_only()
@@ -162,10 +163,10 @@ async def readBook(ctx, book: str):
         return
 
     try:
-        async with db.get() as xact:
-            await xact.execute('INSERT INTO books_readers (book, reader, added) VALUES (?, ?, ?)',
-                       (book_id, ctx.author.id, time.time())
-            )
+        await db.get().execute('INSERT INTO books_readers (book, reader, added) VALUES (?, ?, ?)',
+                   (book_id, ctx.author.id, time.time())
+        )
+        await db.get().commit()
     except aiosqlite.IntegrityError as e:
         if e.args[0] == 'UNIQUE constraint failed: book_readers.book, book_readers.reader':
             await ctx.respond('Already hoarded this book', ephemeral=True)
@@ -178,7 +179,7 @@ async def readBook(ctx, book: str):
 @bot.slash_command(name="forgetbook", description="Forget about a book and remove it from your hoard")
 @guild_only()
 async def forgetBook(ctx, book:str):
-    await db.get().execute('SELECT book FROM book_readers WHERE reader=?', (ctx.author.id,)) as cur:
+    async with db.get().execute('SELECT book FROM book_readers WHERE reader=?', (ctx.author.id,)) as cur:
         result = await cur.fetchone()
     if result is None:
         await ctx.respond('You have nothing to forget')
@@ -189,12 +190,12 @@ async def forgetBook(ctx, book:str):
         await ctx.respond('Book not found', ephemeral=True)
         return
 
-    async with db.get() as xact:
-        async with xact.execute('DELETE FROM book_readers WHERE reader=? AND book=?', (ctx.author.id, book_id)) as cur:
-            if cur.rowcount:
-                await ctx.respond('You forgot about ' + book)
-            else:
-                await ctx.respond('You\'re bad at forgetting')
+    async with db.get().execute('DELETE FROM book_readers WHERE reader=? AND book=?', (ctx.author.id, book_id)) as cur:
+        if cur.rowcount:
+            await ctx.respond('You forgot about ' + book)
+        else:
+            await ctx.respond('You\'re bad at forgetting')
+    await db.get().commit()
 
 @bot.slash_command(name="hoard", description="Check out your (or a wingmate's) hoard")
 @guild_only()
@@ -225,7 +226,7 @@ async def hoard(ctx, user: typing.Optional[discord.Member]):
     pagination = into_paginated_embed(results,
         lambda _: discord.Embed(
             title='Book listing',
-            description=f"{total} books in {username}'s hoard",
+            description=f"{len(results)} books in {username}'s hoard",
         ),
         lambda embed, name, time: \
             embed.add_field(name=name, value=f'Hoarded {time}', inline=False),
@@ -268,11 +269,11 @@ async def startSession(ctx):
         await ctx.respond('Your flight already have an active reading session.')
         return
 
-    async with db.get() as xact:
-        await xact.execute(
-                'INSERT INTO sessions (guild) VALUES (?)',
-                (ctx.guild_id,),
-        )
+    await db.get().execute(
+            'INSERT INTO sessions (guild) VALUES (?)',
+            (ctx.guild_id,),
+    )
+    await db.get().commit()
 
     await ctx.respond(f'<@{ctx.author.id}> started a new reading session.')
 
@@ -284,11 +285,11 @@ async def endSession(ctx):
         await ctx.respond('Your flight doesn\'t have an active reading session.')
         return
 
-    async with db.get() as xact:
-        await xact.execute(
-                'UPDATE sessions SET ended=?, endedBy=?, endedAt=? WHERE guild=? AND NOT ended',
-                (1, ctx.author.id, time.time(), ctx.guild_id),
-        )
+    await db.get().execute(
+            'UPDATE sessions SET ended=?, endedBy=?, endedAt=? WHERE guild=? AND NOT ended',
+            (1, ctx.author.id, time.time(), ctx.guild_id),
+    )
+    await db.get().commit()
 
     await ctx.respond('The current session has ended')
 
@@ -306,13 +307,13 @@ async def addNomination(ctx, book: str):
         return
 
     try:
-        async with db.get() as xact:
-            await xact.execute(
-                    'INSERT INTO nominations (session, name, nominee, added) VALUES (?, ?, ?, ?)',
-                    (session, book, ctx.author.id, time.time()),
-            )
+        await db.get().execute(
+                'INSERT INTO nominations (session, name, nominee, added) VALUES (?, ?, ?, ?)',
+                (session, book, ctx.author.id, time.time()),
+        )
+        await db.get().commit()
     except aiosqlite.IntegrityError as e:
-        if e.args[0] == 'UNIQUE constraint failed: nominations.guild, nominations.name, nominations.nominee':
+        if e.args[0] == 'UNIQUE constraint failed: nominations.session, nominations.name, nominations.nominee':
             await ctx.respond(f'You already nominated {book} for this session.', ephemeral=True)
             return
         else:
@@ -347,11 +348,11 @@ async def drawNominees(
         return
 
     # We'll want to set this up for efficient union at the database level
-    async with db.get() as xact:
-        await xact.execute('CREATE TEMPORARY TABLE IF NOT EXISTS selected_sessions (session INTEGER)')
-        await xact.executemany('INSERT INTO temp.selected_sessions (session) VALUES (?)',
-                       [(item,) for item in sessions],
-        )
+    await db.get().execute('CREATE TEMPORARY TABLE IF NOT EXISTS selected_sessions (session INTEGER)')
+    await db.get().executemany('INSERT INTO temp.selected_sessions (session) VALUES (?)',
+                   [(item,) for item in sessions],
+    )
+    await db.get().commit()
 
     # Now actually draw the nominees
     async with db.get().execute(
@@ -399,17 +400,17 @@ async def listNominations(ctx, past_sessions: Option(int, "How many prior sessio
         await ctx.respond('There are no sessions matching those critera.')
         return
 
-    async with db.get() as xact:
-        await xact.execute('CREATE TEMPORARY TABLE IF NOT EXISTS selected_sessions (session INTEGER)')
-        await xact.executemany('INSERT INTO temp.selected_sessions (session) VALUES (?)',
-                       [(item,) for item in sessions],
-        )
+    await db.get().execute('CREATE TEMPORARY TABLE IF NOT EXISTS selected_sessions (session INTEGER)')
+    await db.get().executemany('INSERT INTO temp.selected_sessions (session) VALUES (?)',
+                   [(item,) for item in sessions],
+    )
+    await db.get().commit()
 
     async with db.get().execute(
             'SELECT name, count(nominee) AS elections \
              FROM nominations \
              WHERE session IN (SELECT session FROM temp.selected_sessions) \
-             GROUP BY name
+             GROUP BY name \
              ORDER BY elections DESC',
              ) as cur:
         results = await cur.fetchall()
@@ -565,8 +566,9 @@ async def main():
                 guild INTEGER,
                 ended INTEGER DEFAULT 0,
                 endedBy INTEGER,
-                endedAt REAL,
+                endedAt REAL
             );
+            CREATE INDEX IF NOT EXISTS sessions_idx_guild ON sessions (guild);
 
             CREATE TABLE IF NOT EXISTS nominations(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -576,7 +578,7 @@ async def main():
                 added REAL,
                 UNIQUE (session, name, nominee)
             );
-            CREATE INDEX IF NOT EXISTS nominations_idx_guild ON nominations(guild);
+            CREATE INDEX IF NOT EXISTS nominations_idx_session ON nominations(session);
             CREATE INDEX IF NOT EXISTS nominations_idx_name ON nominations(name);
             CREATE INDEX IF NOT EXISTS nominations_idx_nominee ON nominations(nominee);
         ''')
