@@ -373,7 +373,7 @@ async def drawNominees(
     paginator = into_paginated_embed(results,
         lambda _: discord.Embed(
             title='Book nominees',
-            description=f'Here are the hchosen books with at least {min_nominations} nominations.',
+            description=f'Here are the chosen books with at least {min_nominations} nominations.',
         ),
         lambda embed, idx, name, nominations: \
                  embed.add_field(name=str(idx+1), value=f'{name} ({nominations})', inline=False),
