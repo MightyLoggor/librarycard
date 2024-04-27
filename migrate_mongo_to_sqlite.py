@@ -25,6 +25,7 @@ parser = argparse.ArgumentParser(description='Migrate the old Mongo schema to th
 parser.add_argument('books', help='File containing the JSON of the books document database')
 parser.add_argument('nominations', help='File containing the JSON of the nominations document database')
 parser.add_argument('sqlite3db', help='SQLite3 database file; ensure this is the one the app will load')
+parser.add_argument('--fresh', action='store_true', help='Drop all previous information--this is necessary if a previous migration failed, but use with caution!')
 
 @dataclass
 class Oid:
@@ -94,6 +95,15 @@ def main(args):
     ''')
     db.commit()
 
+    if args.fresh:
+        print('Pass 0, deleting everything...')
+        db.executescript('''
+            DELETE FROM books;
+            DELETE FROM books_readers;
+            DELETE FROM sessions;
+            DELETE FROM nominations;
+        ''')
+
     print('Pass 1, books...')
     db.executemany('INSERT INTO books (guild, name, added, addedBy) VALUES (?, ?, ?, NULL)',
             (
@@ -101,7 +111,6 @@ def main(args):
                 for book in books
             )
     )
-    db.commit()
 
     print('Pass 2, readers...')
     for book in books:
@@ -113,7 +122,6 @@ def main(args):
                     for reader in book['readers']
                 )
         )
-    db.commit()
 
     print('Pass 3, sessions...')
     db.executemany('INSERT INTO sessions (guild, startedBy, startedAt, ended, endedBy, endedAt) VALUES (?, ?, ?, ?, ?, ?)',
@@ -122,7 +130,6 @@ def main(args):
                 for session in nominations
             )
     )
-    db.commit()
 
     print('Pass 4, nominations...')
     for session in nominations:
@@ -134,6 +141,8 @@ def main(args):
                     for nom in session['nominations']
                 )
         )
+
+    print('Writing results...')
     db.commit()
 
     print('You are cleared for flight :)')
