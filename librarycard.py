@@ -270,8 +270,8 @@ async def startSession(ctx):
         return
 
     await db.get().execute(
-            'INSERT INTO sessions (guild) VALUES (?)',
-            (ctx.guild_id,),
+            'INSERT INTO sessions (guild, startedBy, startedAt) VALUES (?, ?, ?)',
+            (ctx.guild_id, ctx.author.id, time.time()),
     )
     await db.get().commit()
 
@@ -286,8 +286,8 @@ async def endSession(ctx):
         return
 
     await db.get().execute(
-            'UPDATE sessions SET ended=?, endedBy=?, endedAt=? WHERE guild=? AND NOT ended',
-            (1, ctx.author.id, time.time(), ctx.guild_id),
+            'UPDATE sessions SET ended=1, endedBy=?, endedAt=? WHERE guild=? AND NOT ended',
+            (ctx.author.id, time.time(), ctx.guild_id),
     )
     await db.get().commit()
 
@@ -564,6 +564,8 @@ async def main():
             CREATE TABLE IF NOT EXISTS sessions (
                 id INTEGER PRIMARY KEY,
                 guild INTEGER,
+                startedBy INTEGER,
+                startedAt REAL,
                 ended INTEGER DEFAULT 0,
                 endedBy INTEGER,
                 endedAt REAL
