@@ -135,7 +135,7 @@ async def library(ctx):
 @guild_only()
 async def unopened(ctx):
     async with db.get().execute(
-            'SELECT name FROM books EXCEPT SELECT name FROM books JOIN book_readers ON book.id = book_readers.book WHERE reader=?',
+            'SELECT name FROM books EXCEPT SELECT name FROM books JOIN books_readers ON books.id = books_readers.book WHERE reader=?',
             (ctx.author.id,)
             ) as cur:
         results = await cur.fetchall()
@@ -179,7 +179,7 @@ async def readBook(ctx, book: str):
 @bot.slash_command(name="forgetbook", description="Forget about a book and remove it from your hoard")
 @guild_only()
 async def forgetBook(ctx, book:str):
-    async with db.get().execute('SELECT book FROM book_readers WHERE reader=?', (ctx.author.id,)) as cur:
+    async with db.get().execute('SELECT book FROM books_readers WHERE reader=?', (ctx.author.id,)) as cur:
         result = await cur.fetchone()
     if result is None:
         await ctx.respond('You have nothing to forget')
@@ -190,7 +190,7 @@ async def forgetBook(ctx, book:str):
         await ctx.respond('Book not found', ephemeral=True)
         return
 
-    async with db.get().execute('DELETE FROM book_readers WHERE reader=? AND book=?', (ctx.author.id, book_id)) as cur:
+    async with db.get().execute('DELETE FROM books_readers WHERE reader=? AND book=?', (ctx.author.id, book_id)) as cur:
         if cur.rowcount:
             await ctx.respond('You forgot about ' + book)
         else:
@@ -213,7 +213,7 @@ async def hoard(ctx, user: typing.Optional[discord.Member]):
 
     async with db.get().execute(
             'SELECT name, \
-                    strftime("%Y-%m-%d %H:%M:%SZ", books_readers.added, "unixepoch") AS time\
+                    books_readers.added AS time\
              FROM books JOIN books_readers ON books.id = books_readers.book \
              WHERE reader = ?',
              (userid,)
@@ -225,11 +225,11 @@ async def hoard(ctx, user: typing.Optional[discord.Member]):
 
     pagination = into_paginated_embed(results,
         lambda _: discord.Embed(
-            title='Book listing',
+            title='Book Hoard',
             description=f"{len(results)} books in {username}'s hoard",
         ),
         lambda embed, name, time: \
-            embed.add_field(name=name, value=f'Hoarded {time}', inline=False),
+            embed.add_field(name=name, value=f'Hoarded <t:{round(time)}:f>', inline=False),
     )
     await pagination.respond(ctx.interaction, ephemeral=ephem)
 
@@ -252,7 +252,7 @@ async def leaderboard(ctx):
 
     pagination = into_paginated_embed(results,
         lambda _: discord.Embed(
-            title='Book listing',
+            title='Leaderboard',
             description=f'{total} on the board.',
         ),
         lambda embed, idx, userid, size: \
@@ -326,57 +326,30 @@ async def addNomination(ctx, book: str):
 @default_permissions(manage_messages=True)
 async def drawNominees(
   ctx, 
-  min_nominations: Option(int, "Minimum of times the book received a nomination in the session search period.", min_value=2, default=2),
+  min_nominations: Option(int, "Minimum of times the book received a nomination in the session search period.", min_value=1, default=2),
   past_sessions: Option(int, "How many prior sessions should be considered in the search.", min_value=0, default=0)):
-    sessions = []
-    # Add the current session, if it exists
-    session = await current_session(ctx.guild_id)
-    if session is None:
-        sessions.append(session)
-    # ... and then any prior, at option
-    if past_sessions:
-        async with db.get().execute(
-            'SELECT id FROM sessions WHERE guild=? AND ended ORDER BY endedAt DESC LIMIT ?',
-            (ctx.guild_id, past_sessions),
-            ) as cur:
-            # .extend would be nicer, but it's not async-compatible
-            async for row in cur:
-                sessions.append(row)
-
-    if not sessions:
-        await ctx.respond('There are no sessions to choose from.')
-        return
-
-    # We'll want to set this up for efficient union at the database level
-    await db.get().execute('CREATE TEMPORARY TABLE IF NOT EXISTS selected_sessions (session INTEGER)')
-    await db.get().executemany('INSERT INTO temp.selected_sessions (session) VALUES (?)',
-                   [(item,) for item in sessions],
-    )
-    await db.get().commit()
-
-    # Now actually draw the nominees
     async with db.get().execute(
             'SELECT name, \
                 count(nominee) AS elections \
              FROM nominations \
-             WHERE session IN (SELECT session FROM temp.selected_sessions) AND \
-                elections >= ? \
+             WHERE session in (select id from sessions where guild = ? order by startedAt desc limit ?) \
              GROUP BY name \
-             ORDER BY elections DESC',
-             (min_nominations,),
+             having elections >= ? \
+             ORDER BY elections DESC;',
+             (ctx.guild_id, past_sessions + 1 ,min_nominations,),
              ) as cur:
         results = await cur.fetchall()
     if not results:
         await ctx.respond('No books matched your selection criteria.')
         return
 
-    paginator = into_paginated_embed(results,
+    pagination = into_paginated_embed(results,
         lambda _: discord.Embed(
             title='Book nominees',
             description=f'Here are the chosen books with at least {min_nominations} nominations.',
         ),
         lambda embed, idx, name, nominations: \
-                 embed.add_field(name=str(idx+1), value=f'{name} ({nominations})', inline=False),
+                 embed.add_field(name=str(name), value=f'Nominated by {nominations} users', inline=False),
         enumerates=True,
     )
     await pagination.respond(ctx.interaction, ephemeral=True)
@@ -384,35 +357,14 @@ async def drawNominees(
 @bot.slash_command(name="list-nominations", description="Lists all nomination for the current active session")
 @guild_only()
 async def listNominations(ctx, past_sessions: Option(int, "How many prior sessions should be considered in the search.", min_value=0, max_value=5, default=0)):
-    sessions = []
-    session = await current_session(ctx.guild_id)
-    if session is not None:
-        sessions.append(session)
-    if past_sessions:
-        async with db.get().execute(
-                'SELECT id FROM sessions WHERE guild=? AND ended ORDER BY endedAt DESC LIMIT ?',
-                (ctx.guild_id, past_sessions),
-                ) as cur:
-            async for row in cur:
-                sessions.append(row)
-
-    if not sessions:
-        await ctx.respond('There are no sessions matching those critera.')
-        return
-
-    await db.get().execute('CREATE TEMPORARY TABLE IF NOT EXISTS selected_sessions (session INTEGER)')
-    await db.get().executemany('INSERT INTO temp.selected_sessions (session) VALUES (?)',
-                   [(item,) for item in sessions],
-    )
-    await db.get().commit()
-
     async with db.get().execute(
-            'SELECT name, count(nominee) AS elections \
-             FROM nominations \
-             WHERE session IN (SELECT session FROM temp.selected_sessions) \
-             GROUP BY name \
-             ORDER BY elections DESC',
-             ) as cur:
+            'SELECT name, count(nominee) AS elections  \
+            FROM nominations \
+            WHERE session IN (select id from sessions where guild = ? order by startedAt desc limit ?) \
+            GROUP BY name \
+            ORDER BY name asc;',
+             (ctx.guild_id, past_sessions + 1),
+            ) as cur:
         results = await cur.fetchall()
     if not results:
         await ctx.respond('There are no nominations within the selected sessions.')
@@ -420,11 +372,11 @@ async def listNominations(ctx, past_sessions: Option(int, "How many prior sessio
 
     paginator = into_paginated_embed(results,
         lambda _: discord.Embed(
-            title='Book nomination',
+            title='Book Nominations',
             description=f'{len(results)} books currently nominated.',
         ),
         lambda embed, idx, name, nominations: \
-                embed.add_field(name=str(idx+1), value=f'{name} ({nominations})', inline=False),
+                embed.add_field(name=str(name), value=f'Nominated by {nominations} users', inline=False),
         enumerates=True,
     )
     await paginator.respond(ctx.interaction, ephemeral=True)
