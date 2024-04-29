@@ -1,6 +1,7 @@
 import argparse
 import sqlite3
 import json
+import re
 from datetime import datetime
 from dataclasses import dataclass
 
@@ -26,6 +27,7 @@ parser.add_argument('books', help='File containing the JSON of the books documen
 parser.add_argument('nominations', help='File containing the JSON of the nominations document database')
 parser.add_argument('sqlite3db', help='SQLite3 database file; ensure this is the one the app will load')
 parser.add_argument('--fresh', action='store_true', help='Drop all previous information--this is necessary if a previous migration failed, but use with caution!')
+parser.add_argument('--encoding', default='utf8', help='Encoding of the JSON dumps; this should probably be "utf8" unless your Mongo was dumped in a peculiar way')
 
 @dataclass
 class Oid:
@@ -41,10 +43,17 @@ def json_object(o):
         return Oid(oid=o['$oid'])
     return o
 
+# This is a direct port frm PR 15
+def unsmarten(s):
+    s = re.sub('[‘’]', "'", s)
+    s = re.sub('[“”]', '"', s)
+    s = s.replace('—', '--')
+    return s
+
 def main(args):
-    with open(args.books) as f:
+    with open(args.books, encoding=args.encoding) as f:
         books = json.load(f, object_hook=json_object)
-    with open(args.nominations) as f:
+    with open(args.nominations, encoding=args.encoding) as f:
         nominations = json.load(f, object_hook=json_object)
 
     # TODO: refactor this into a schema; even better, an ORM, in a separate module
@@ -107,7 +116,7 @@ def main(args):
     print('Pass 1, books...')
     db.executemany('INSERT INTO books (guild, name, added, addedBy) VALUES (?, ?, ?, NULL)',
             (
-                (book['guild'], book['name'], book['added'].timestamp())
+                (book['guild'], unsmarten(book['name']), book['added'].timestamp())
                 for book in books
             )
     )
@@ -137,7 +146,7 @@ def main(args):
         rowid = cur.fetchone()[0]
         db.executemany('INSERT INTO nominations (session, name, nominee, added) VALUES (?, ?, ?, ?)',
                 (
-                    (rowid, nom['name'], nom['user'], nom['nominated'].timestamp())
+                    (rowid, unsmarten(nom['name']), nom['user'], nom['nominated'].timestamp())
                     for nom in session['nominations']
                 )
         )
