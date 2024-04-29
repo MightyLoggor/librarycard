@@ -123,7 +123,7 @@ def main(args):
 
     print('Pass 2, readers...')
     for book in books:
-        cur = db.execute('SELECT id FROM books WHERE guild = ? AND name = ?', (book['guild'], book['name']))
+        cur = db.execute('SELECT id FROM books WHERE guild = ? AND name = ?', (book['guild'], unsmarten(book['name'])))
         rowid = cur.fetchone()[0]
         db.executemany('INSERT INTO books_readers (book, reader, added) VALUES (?, ?, ?)',
                 (
