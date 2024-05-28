@@ -8,18 +8,14 @@ services:
       - lan
     restart: unless-stopped
     environment:
-      MONGO_STRING: "mongodb://mongo:27017/"
-
-  mongodb:
-    image: mongo
-    hostname: mongo
-    domainname: mongo
-    restart: unless-stopped
-    networks:
-      - lan
+      SQLITE3_DATABASE: /database/db.sqlite3
+    volumes:
+      - type: volume
+        source: database
+        target: /database
 
 volumes:
-  mongo:
+  database:
 
 networks:
   lan:

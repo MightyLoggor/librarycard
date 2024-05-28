@@ -63,7 +63,7 @@ async def getBook(book_url):
             # get book image
             book.image_link = html_soup.find("meta", attrs={"property": "og:image"})["content"]
             # get book description
-            book.description = "{}...".format(html_soup.find("div", attrs={"class": "BookPageMetadataSection__description"}).find("span").get_text()[:200])
+            book.description = "{}...".format(html_soup.find("div", attrs={"class": "BookPageMetadataSection__description"}).find("span").get_text()[:400])
             # get book rating
             book.rating = html_soup.find("div", attrs={"class": "RatingStatistics__rating"}).get_text()
             return book
