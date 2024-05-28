@@ -4,6 +4,7 @@ import itertools
 import lib.goodreads as goodreads
 import lib.royalroad as royalroad
 import os
+import re
 from dotenv import load_dotenv
 import typing
 import pymongo
@@ -35,10 +36,29 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = discord.Bot(intents=intents)
 
+def pascal_case(input_str):
+    words = input_str.split()
+    capitalized_words = [word.capitalize() for word in words]
+    return ' '.join(capitalized_words)
+
+def unsmarten(s):
+    # The patterns below mostly counteract Apple's "Format dashes and quotation
+    # marks" default; there's no question they look better, but they're
+    # difficult to type on standard keyboards on other operating systems.
+
+    # The re compile cache will work here, resist the urge to refactor to a
+    # global pattern
+    s = re.sub('[‘’]', "'", s)
+    s = re.sub('[“”]', '"', s)
+    s = s.replace('—', '--')
+    return s
+
 @bot.slash_command(name="addbook", description = "Add a book to your Flight's library")
 @guild_only()
 @default_permissions(manage_messages=True)
 async def addBook(ctx, book: str):
+
+  book = unsmarten(book)
 
   search = {
     'name': book,
@@ -70,6 +90,8 @@ async def addBook(ctx, book: str):
 @guild_only()
 @default_permissions(manage_messages=True)
 async def delBook(ctx, book: str):
+
+  book = unsmarten(book)
 
   search = {
     'name': book,
@@ -251,6 +273,8 @@ async def unopened(ctx):
 @bot.slash_command(name="readbook", description="Read a book and add it to your hoard")
 @guild_only()
 async def readBook(ctx, book: str):
+  book = unsmarten(book)
+
   searchpipeline = [ 
     { '$match': {
     'guild': ctx.guild_id,
@@ -350,6 +374,8 @@ async def readBook(ctx, book: str):
 @bot.slash_command(name="forgetbook", description="Forget about a book and remove it from your hoard")
 @guild_only()
 async def forgetBook(ctx, book:str):
+  book = unsmarten(book)
+
   existingsearchpipeline = [ 
     { '$match': {
     'guild': ctx.guild_id,
@@ -607,7 +633,7 @@ async def endSession(ctx):
 @bot.slash_command(name="nominate", description = "Nominate a book to your Flight's reading session")
 @guild_only()
 async def addNomination(ctx, book: str):
-  book = pascal_case(str.strip(book))
+  book = pascal_case(unsmarten(book.strip()))
   search = {
     'guild': ctx.guild_id,
     'ended': {'$exists': False}
@@ -915,11 +941,6 @@ async def getRoyalRoadBook(book_url):
     embed.set_thumbnail(url=book.author_img)
 
     return embed # Send the embed with some text
-
-def pascal_case(input_str):
-    words = input_str.split()
-    capitalized_words = [word.capitalize() for word in words]
-    return ' '.join(capitalized_words)
 
 def formatBookItemList(items):
     formattedItems = []
