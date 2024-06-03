@@ -17,8 +17,10 @@ from discord.ext.pages import Paginator
 from pymongo import TEXT
 from pymongo import ASCENDING, DESCENDING
 from datetime import datetime
-from discord import Option, default_permissions
+from discord import Option, default_permissions, option
 from discord import guild_only
+import data.adventure as adventure_db
+from decorators import exact, prefix
 
 
 load_dotenv()
@@ -26,6 +28,7 @@ load_dotenv()
 pagination = int(os.environ.get('PAGINATION', 10))
 
 db = contextvars.ContextVar('db')
+dsn = os.getenv('SQLITE3_DATABASE')
 
 async def current_session(guild_id):
     async with db.get().execute(
@@ -351,13 +354,27 @@ async def addNomination(ctx, book: str):
     else:
         await ctx.respond(f'{book} nominated!')
   
-@bot.slash_command(name="draw-nominees", description = "List all the book in your Flight's library")
+@bot.slash_command(name="draw-nominees", description = "List all the book in your Flight's library", guild_ids=["189601545950724096"])
+@option(
+    "min_nominations", 
+    description="Minimum of times the book received a nomination in the session search period.",
+    required=False,
+    default=2,
+    min_value=1
+)
+@option(
+    "past_sessions", 
+    description="How many prior sessions should be considered in the search.",
+    required=False,
+    default=0,
+    min_value=0
+)
 @guild_only()
 @default_permissions(manage_messages=True)
 async def drawNominees(
   ctx, 
-  min_nominations: Option(int, "Minimum of times the book received a nomination in the session search period.", min_value=1, default=2),
-  past_sessions: Option(int, "How many prior sessions should be considered in the search.", min_value=0, default=0)):
+  min_nominations: int,
+  past_sessions: int):
     async with db.get().execute(
             'SELECT name, \
                 count(nominee) AS elections \
@@ -384,9 +401,17 @@ async def drawNominees(
     )
     await pagination.respond(ctx.interaction, ephemeral=True)
 
-@bot.slash_command(name="list-nominations", description="Lists all nomination for the current active session")
+@bot.slash_command(name="list-nominations", description="Lists all nomination for the current active session", guild_ids=["189601545950724096"])
+@option(
+    "past_sessions", 
+    description="How many prior sessions should be considered in the search.",
+    required=False,
+    min_value=0,
+    max_value=5,
+    default=0
+)
 @guild_only()
-async def listNominations(ctx, past_sessions: Option(int, "How many prior sessions should be considered in the search.", min_value=0, max_value=5, default=0)):
+async def listNominations(ctx, past_sessions: int):
     async with db.get().execute(
             'SELECT name, count(nominee) AS elections  \
             FROM nominations \
@@ -484,21 +509,122 @@ async def easter_egg(message: discord.message):
     random_emoji = emoji_list[random.randint(0, emoji_list.__len__()-1)]
     await message.add_reaction(random_emoji)
 
+@prefix(val=("https://www.royalroad.com/fiction/", "https://royalroad.com/fiction/"))
 async def royalroad_embed(message: discord.message):
-  if message.content.startswith(("https://www.royalroad.com/fiction/", "https://royalroad.com/fiction/")) :
-        book_url = message.content.split()[0]
-        embed = await getRoyalRoadBook("/".join(book_url.split('/')[:6])) #fixes the url format
-        if embed:
-            await message.channel.send(embed=embed, reference=message.to_reference())
-            await message.edit(suppress = True)
+    book_url = message.content.split()[0]
+    embed = await getRoyalRoadBook("/".join(book_url.split('/')[:6])) #fixes the url format
+    if embed:
+        await message.channel.send(embed=embed, reference=message.to_reference())
+        await message.edit(suppress = True)
 
+@prefix(val=("https://www.goodreads.com/book/show/", "https://goodreads.com/book/show/"))
 async def goodreads_embed(message: discord.message):
-  if message.content.startswith(("https://www.goodreads.com/book/show/", "https://goodreads.com/book/show/")) :
-        book_url = message.content.split()[0]
-        embed = await getGoodreadsBook(book_url)
-        if embed:
-            await message.channel.send(embed=embed, reference=message.to_reference())
-            await message.edit(suppress = True)
+    book_url = message.content.split()[0]
+    embed = await getGoodreadsBook(book_url)
+    if embed:
+        await message.channel.send(embed=embed, reference=message.to_reference())
+        await message.edit(suppress = True)
+
+
+@bot.slash_command(name="replay-stage", description = "Attempts to resend the current stage messages in case the bot fails to do so automatically.", guild_ids=["189601545950724096"])
+@guild_only()
+@default_permissions(manage_messages=True)
+async def startStage(ctx):
+    await startStageInternal(ctx.guild_id)
+    await ctx.respond(f'Stage replayed!', ephemeral=True)
+
+@bot.slash_command(name="reset-adventure", description = "Reset the whole adventure.", guild_ids=["189601545950724096"])
+@guild_only()
+@default_permissions(manage_messages=True)
+async def resetEverything(ctx):
+    # To-do: make this guild only
+    if await adventure_db.resetEverything(dsn):
+       await ctx.respond(f'Reset!', ephemeral=True)
+
+async def startStageInternal(guild_id: int):
+    adventure = await  adventure_db.getCurrentAdventure(guild_id, dsn)
+    if adventure is None:
+        return
+    
+    stage = await  adventure_db.getCurrentStage(adventure._id, dsn)
+    if stage is None:
+        return
+    
+    await sendAnnouncement(adventure.annoucement_channel, "## {0}\n{1}".format(stage.title, stage.query))
+
+@bot.slash_command(name="start-adventure", description = "Starts the adventure!", guild_ids=["189601545950724096"])
+@guild_only()
+@default_permissions(manage_messages=True)
+async def startAdventure(ctx):
+    adventure = await  adventure_db.getCurrentAdventure(ctx.guild_id, dsn)
+    if adventure is not None:
+        await ctx.respond("There's already an ongoing adventure. Let's complete it before starting a new!", ephemeral=True)
+        return
+
+    nextadventure = await  adventure_db.getNextAdventure(ctx.guild_id, dsn)
+    if nextadventure is None:
+        await ctx.respond("Further adventures are still in the making. Hang in there!", ephemeral=True)
+        return
+    
+    if await  adventure_db.startAdventure(nextadventure._id, ctx.author.id, dsn):
+        await ctx.respond(":saluting_face: :dragon:", ephemeral=True)
+        await sendAnnouncement(nextadventure.annoucement_channel, "# {0}\n{1}".format(nextadventure.name, nextadventure.description))
+        await startStageInternal(ctx.guild_id)
+    else:
+        await ctx.respond("Sorry but I couldn't start the adventure.", ephemeral=True)
+
+@bot.slash_command(name="end-adventure", description = "Ends the current adventure!", guild_ids=["189601545950724096"])
+@guild_only()
+@default_permissions(manage_messages=True)
+async def endAdventure(ctx):
+    adventure = await  adventure_db.getCurrentAdventure(ctx.guild_id, dsn)
+    if adventure is None:
+        await ctx.respond("There are no current ongoing adventure.", ephemeral=True)
+        return
+
+    if await  adventure_db.endAdventure(adventure._id, ctx.author.id, dsn):
+        await ctx.respond(":saluting_face: :dragon:", ephemeral=True)
+    else:
+        await ctx.respond("Sorry but I couldn't end the adventure.", ephemeral=True)
+
+
+@prefix(val="Bookwyrm the answer is ")
+async def answerStage(message: discord.message):
+    answer = ' '.join(message.content.removeprefix("Bookwyrm the answer is ").strip().lower().split())
+    if not bool(answer):
+        return;
+    
+    adventure = await  adventure_db.getCurrentAdventure(message.guild.id, dsn)
+    if adventure is None or message.channel.id != adventure.adventure_channel:
+        return
+
+    stage = await  adventure_db.getCurrentStage(adventure._id, dsn)
+    if stage is None:
+        return
+
+    answer_correct = await  adventure_db.verifyAnswer(stage._id, answer, message.author.id, dsn)
+
+    # Case the answer is correct!
+    if answer_correct:
+        await sendAnnouncement(adventure.annoucement_channel, "### Stage Cleared\nThanks to the mighty mind of <@{0}> the truth has been unveiled and a new door has opened. \nAnswer: ||{1}||".format(message.author.id, answer))
+        await startStageInternal(message.guild.id)
+        return
+
+    chance = float(os.getenv('STAGE_FAILURE_TEXT_CHANCE'))
+    failure_texts = []
+    del failure_texts[:]
+
+    if random.random() * 100 <= chance:
+        failure_texts = await  adventure_db.getStageFailureTexts(stage._id, dsn)
+        if failure_texts.__len__() == 0:
+            failure_texts = await  adventure_db.getGenericFailureTexts(stage.adventure_id, dsn)
+    else:
+        failure_texts = await  adventure_db.getGenericFailureTexts(stage.adventure_id, dsn)
+
+    await message.channel.send(failure_texts[random.randint(0, failure_texts.__len__()-1)])
+
+async def sendAnnouncement(channel: id, message: str):
+    await bot.get_channel(channel).send(message)
 
 
 @bot.event
@@ -514,6 +640,7 @@ async def on_message(message: discord.message):
     await goodreads_embed(message)
     await royalroad_embed(message)
     await easter_egg(message)
+
 
 async def main():
     async with aiosqlite.connect(os.environ['SQLITE3_DATABASE']) as _db:
@@ -560,6 +687,56 @@ async def main():
             CREATE INDEX IF NOT EXISTS nominations_idx_session ON nominations(session);
             CREATE INDEX IF NOT EXISTS nominations_idx_name ON nominations(name);
             CREATE INDEX IF NOT EXISTS nominations_idx_nominee ON nominations(nominee);
+            
+            CREATE TABLE IF NOT EXISTS "adventure" (
+                "id" INTEGER NOT NULL UNIQUE,
+                "guild_id" INTEGER NOT NULL,
+                "name" TEXT,
+                "description" TEXT,
+                "announcement_channel_id" INTEGER,
+                "adventure_channel_id" INTEGER,
+                "started_at" INTEGER,
+                "started_by" INTEGER,
+                "ended_at" INTEGER,
+                "ended_by" INTEGER,
+                PRIMARY KEY("id" AUTOINCREMENT)
+            );
+         
+            CREATE TABLE IF NOT EXISTS "adventure_failure_text" (
+                "id" INTEGER NOT NULL UNIQUE,
+                "adventure_id" INTEGER NOT NULL,
+                "failure_text" TEXT NOT NULL,
+                FOREIGN KEY("adventure_id") REFERENCES "adventure"("id"),
+                PRIMARY KEY("id" AUTOINCREMENT)
+            );
+
+            CREATE TABLE IF NOT EXISTS "adventure_stage" (
+                "id" INTEGER NOT NULL UNIQUE,
+                "adventure_id" INTEGER NOT NULL,
+                "number" INTEGER NOT NULL,
+                "title" TEXT NOT NULL,
+                "query" TEXT NOT NULL,
+                "cleared_at" INTEGER,
+                "cleared_by" INTEGER,
+                FOREIGN KEY("adventure_id") REFERENCES "adventure"("id"),
+                PRIMARY KEY("id" AUTOINCREMENT)
+            );
+
+            CREATE TABLE IF NOT EXISTS "adventure_stage_answers" (
+                "id" INTEGER NOT NULL UNIQUE,
+                "adventure_stage_id" INTEGER NOT NULL,
+                "answer" TEXT NOT NULL,
+                FOREIGN KEY("adventure_stage_id") REFERENCES "adventure_stage"("id"),
+                PRIMARY KEY("id" AUTOINCREMENT)
+            );
+
+            CREATE TABLE IF NOT EXISTS "adventure_stage_failure_text" (
+                "id" INTEGER NOT NULL UNIQUE,
+                "adventure_stage_id" INTEGER NOT NULL,
+                "failure_text" TEXT NOT NULL,
+                PRIMARY KEY("id" AUTOINCREMENT),
+                FOREIGN KEY("adventure_stage_id") REFERENCES "adventure_stage"("id")
+            );
         ''')
         await db.get().commit()
         await bot.start(os.environ['TOKEN'])

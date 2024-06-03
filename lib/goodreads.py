@@ -1,21 +1,6 @@
 from bs4 import BeautifulSoup
+from models.goodreads import Book, Author
 import aiohttp
-
-class Book:
-    full_title= ""
-    title= ""
-    series=""
-    series_link=""
-    authors= []
-    rating= ""
-    description= ""
-    image_link = ""
-
-class Author:
-    name=""
-    link=""
-
-
 
 async def getBook(book_url):
     url_to_scrape = book_url

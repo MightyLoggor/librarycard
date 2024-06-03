@@ -1,25 +1,7 @@
 from bs4 import BeautifulSoup
+from models.royalroad import Book, Tag 
 import re
 import aiohttp
-
-class Book:
-    full_title= ""
-    title= ""
-    author= ""
-    author_link= ""
-    author_img= ""
-    tags= []
-    rating= ""
-    favorites= ""
-    followers= ""
-    chapter_count= ""
-    page_count= ""
-    description= ""
-    image_link = ""
-
-class Tag:
-    name=""
-    link=""
 
 def urlToAbsolute(url):
     if url.startswith("/"):
