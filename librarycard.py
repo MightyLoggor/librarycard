@@ -22,7 +22,6 @@ load_dotenv()
 pagination = int(os.environ.get('PAGINATION', 10))
 
 db = contextvars.ContextVar('db')
-dsn = os.getenv('SQLITE3_DATABASE')
 
 async def current_session(guild_id):
     async with db.get().execute(
@@ -531,15 +530,15 @@ async def startStage(ctx):
 @guild_only()
 @default_permissions(manage_messages=True)
 async def resetEverything(ctx):
-    if await adventure_db.resetEverything(ctx.guild_id, dsn):
+    if await adventure_db.resetEverything(ctx.guild_id, db):
        await ctx.respond('Reset!', ephemeral=True)
 
 async def startStageInternal(guild_id: int):
-    adventure = await  adventure_db.getCurrentAdventure(guild_id, dsn)
+    adventure = await  adventure_db.getCurrentAdventure(guild_id, db)
     if adventure is None:
         return
     
-    stage = await  adventure_db.getCurrentStage(adventure._id, dsn)
+    stage = await  adventure_db.getCurrentStage(adventure._id, db)
     if stage is None:
         return
     
@@ -549,17 +548,17 @@ async def startStageInternal(guild_id: int):
 @guild_only()
 @default_permissions(manage_messages=True)
 async def startAdventure(ctx):
-    adventure = await  adventure_db.getCurrentAdventure(ctx.guild_id, dsn)
+    adventure = await  adventure_db.getCurrentAdventure(ctx.guild_id, db)
     if adventure is not None:
         await ctx.respond("There's already an ongoing adventure. Let's complete it before starting a new!", ephemeral=True)
         return
 
-    nextadventure = await  adventure_db.getNextAdventure(ctx.guild_id, dsn)
+    nextadventure = await  adventure_db.getNextAdventure(ctx.guild_id, db)
     if nextadventure is None:
         await ctx.respond("Further adventures are still in the making. Hang in there!", ephemeral=True)
         return
     
-    if await  adventure_db.startAdventure(nextadventure._id, ctx.author.id, dsn):
+    if await  adventure_db.startAdventure(nextadventure._id, ctx.author.id, db):
         await ctx.respond(":saluting_face: :dragon:", ephemeral=True)
         await sendAnnouncement(nextadventure.annoucement_channel, "# {0}\n{1}".format(nextadventure.name, nextadventure.description))
         await startStageInternal(ctx.guild_id)
@@ -570,12 +569,12 @@ async def startAdventure(ctx):
 @guild_only()
 @default_permissions(manage_messages=True)
 async def endAdventure(ctx):
-    adventure = await  adventure_db.getCurrentAdventure(ctx.guild_id, dsn)
+    adventure = await  adventure_db.getCurrentAdventure(ctx.guild_id, db)
     if adventure is None:
         await ctx.respond("There are no current ongoing adventure.", ephemeral=True)
         return
 
-    if await  adventure_db.endAdventure(adventure._id, ctx.author.id, dsn):
+    if await  adventure_db.endAdventure(adventure._id, ctx.author.id, db):
         await ctx.respond(":saluting_face: :dragon:", ephemeral=True)
     else:
         await ctx.respond("Sorry but I couldn't end the adventure.", ephemeral=True)
@@ -587,15 +586,15 @@ async def answerStage(message: discord.message):
     if not bool(answer):
         return
     
-    adventure = await  adventure_db.getCurrentAdventure(message.guild.id, dsn)
+    adventure = await  adventure_db.getCurrentAdventure(message.guild.id, db)
     if adventure is None or message.channel.id != adventure.adventure_channel:
         return
 
-    stage = await  adventure_db.getCurrentStage(adventure._id, dsn)
+    stage = await  adventure_db.getCurrentStage(adventure._id, db)
     if stage is None:
         return
 
-    answer_correct = await  adventure_db.verifyAnswer(stage._id, answer, message.author.id, dsn)
+    answer_correct = await  adventure_db.verifyAnswer(stage._id, answer, message.author.id, db)
 
     # Case the answer is correct!
     if answer_correct:
@@ -608,11 +607,11 @@ async def answerStage(message: discord.message):
     del failure_texts[:]
 
     if random.random() * 100 <= chance:
-        failure_texts = await  adventure_db.getStageFailureTexts(stage._id, dsn)
+        failure_texts = await  adventure_db.getStageFailureTexts(stage._id, db)
         if failure_texts.__len__() == 0:
-            failure_texts = await  adventure_db.getGenericFailureTexts(stage.adventure_id, dsn)
+            failure_texts = await  adventure_db.getGenericFailureTexts(stage.adventure_id, db)
     else:
-        failure_texts = await  adventure_db.getGenericFailureTexts(stage.adventure_id, dsn)
+        failure_texts = await  adventure_db.getGenericFailureTexts(stage.adventure_id, db)
 
     await message.channel.send(failure_texts[random.randint(0, failure_texts.__len__()-1)])
 
@@ -633,6 +632,7 @@ async def on_message(message: discord.message):
     await goodreads_embed(message)
     await royalroad_embed(message)
     await easter_egg(message)
+    await answerStage(message)
 
 
 async def main():
