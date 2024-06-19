@@ -347,7 +347,7 @@ async def addNomination(ctx, book: str):
     else:
         await ctx.respond(f'{book} nominated!')
   
-@bot.slash_command(name="draw-nominees", description = "List all the book in your Flight's library", guild_ids=["189601545950724096"])
+@bot.slash_command(name="draw-nominees", description = "List all the book in your Flight's library")
 @option(
     "min_nominations", 
     description="Minimum of times the book received a nomination in the session search period.",
@@ -394,7 +394,7 @@ async def drawNominees(
     )
     await pagination.respond(ctx.interaction, ephemeral=True)
 
-@bot.slash_command(name="list-nominations", description="Lists all nomination for the current active session", guild_ids=["189601545950724096"])
+@bot.slash_command(name="list-nominations", description="Lists all nomination for the current active session")
 @option(
     "past_sessions", 
     description="How many prior sessions should be considered in the search.",
@@ -519,14 +519,14 @@ async def goodreads_embed(message: discord.message):
         await message.edit(suppress = True)
 
 
-@bot.slash_command(name="replay-stage", description = "Attempts to resend the current stage messages in case the bot fails to do so automatically.", guild_ids=["189601545950724096"])
+@bot.slash_command(name="replay-stage", description = "Attempts to resend the current stage messages in case the bot fails to do so automatically.")
 @guild_only()
 @default_permissions(manage_messages=True)
 async def startStage(ctx):
     await startStageInternal(ctx.guild_id)
     await ctx.respond('Stage replayed!', ephemeral=True)
 
-@bot.slash_command(name="reset-adventure", description = "Reset the whole adventure.", guild_ids=["189601545950724096"])
+@bot.slash_command(name="reset-adventure", description = "Reset the whole adventure.")
 @guild_only()
 @default_permissions(manage_messages=True)
 async def resetEverything(ctx):
@@ -544,7 +544,7 @@ async def startStageInternal(guild_id: int):
     
     await sendAnnouncement(adventure.annoucement_channel, "## {0}\n{1}".format(stage.title, stage.query))
 
-@bot.slash_command(name="start-adventure", description = "Starts the adventure!", guild_ids=["189601545950724096"])
+@bot.slash_command(name="start-adventure", description = "Starts the adventure!")
 @guild_only()
 @default_permissions(manage_messages=True)
 async def startAdventure(ctx):
@@ -565,7 +565,7 @@ async def startAdventure(ctx):
     else:
         await ctx.respond("Sorry but I couldn't start the adventure.", ephemeral=True)
 
-@bot.slash_command(name="end-adventure", description = "Ends the current adventure!", guild_ids=["189601545950724096"])
+@bot.slash_command(name="end-adventure", description = "Ends the current adventure!")
 @guild_only()
 @default_permissions(manage_messages=True)
 async def endAdventure(ctx):
