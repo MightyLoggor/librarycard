@@ -89,10 +89,10 @@ async def endAdventure(adventure_id: int, user_id: int, dsn: str):
 
         return True
 
-async def resetEverything(dsn: str):
+async def resetEverything(guild_id: int, dsn: str):
     async with aiosqlite.connect(dsn) as aconn:
-        await aconn.execute("UPDATE adventure SET started_at= null, started_by= null, ended_at= null, ended_by= null;")
-        await aconn.execute("UPDATE adventure_stage SET cleared_at= null, cleared_by= null;")
+        await aconn.execute("UPDATE adventure SET started_at= null, started_by= null, ended_at= null, ended_by= null WHERE guild_id = ?;", (guild_id,))
+        await aconn.execute("UPDATE adventure_stage SET cleared_at= null, cleared_by= null WHERE adventure_id in (select id from adventure where guild_id = ?);", (guild_id,))
         await aconn.commit()
 
         return True

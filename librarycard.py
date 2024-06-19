@@ -1,7 +1,6 @@
 import random
 import discord
 import contextvars
-import itertools
 import lib.goodreads as goodreads
 import lib.royalroad as royalroad
 import os
@@ -11,16 +10,11 @@ import aiosqlite
 import time
 from dotenv import load_dotenv
 import typing
-from bson.objectid import ObjectId
-import math
 from discord.ext.pages import Paginator
-from pymongo import TEXT
-from pymongo import ASCENDING, DESCENDING
-from datetime import datetime
-from discord import Option, default_permissions, option
+from discord import default_permissions, option
 from discord import guild_only
 import data.adventure as adventure_db
-from decorators import exact, prefix
+from decorators import prefix
 
 
 load_dotenv()
@@ -439,7 +433,7 @@ async def listNominations(ctx, past_sessions: int):
 async def getGoodreadsBook(book_url):
     book = await goodreads.getBook(book_url)
     if not book:
-        return;
+        return
     
     embed = discord.Embed(
         title=book.full_title,
@@ -467,7 +461,7 @@ async def getGoodreadsBook(book_url):
 async def getRoyalRoadBook(book_url):
     book = await royalroad.getBook(book_url)
     if not book:
-        return;
+        return
     
     embed = discord.Embed(
         title=book.full_title,
@@ -531,15 +525,14 @@ async def goodreads_embed(message: discord.message):
 @default_permissions(manage_messages=True)
 async def startStage(ctx):
     await startStageInternal(ctx.guild_id)
-    await ctx.respond(f'Stage replayed!', ephemeral=True)
+    await ctx.respond('Stage replayed!', ephemeral=True)
 
 @bot.slash_command(name="reset-adventure", description = "Reset the whole adventure.", guild_ids=["189601545950724096"])
 @guild_only()
 @default_permissions(manage_messages=True)
 async def resetEverything(ctx):
-    # To-do: make this guild only
-    if await adventure_db.resetEverything(dsn):
-       await ctx.respond(f'Reset!', ephemeral=True)
+    if await adventure_db.resetEverything(ctx.guild_id, dsn):
+       await ctx.respond('Reset!', ephemeral=True)
 
 async def startStageInternal(guild_id: int):
     adventure = await  adventure_db.getCurrentAdventure(guild_id, dsn)
@@ -592,7 +585,7 @@ async def endAdventure(ctx):
 async def answerStage(message: discord.message):
     answer = ' '.join(message.content.removeprefix("Bookwyrm the answer is ").strip().lower().split())
     if not bool(answer):
-        return;
+        return
     
     adventure = await  adventure_db.getCurrentAdventure(message.guild.id, dsn)
     if adventure is None or message.channel.id != adventure.adventure_channel:
